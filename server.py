@@ -1,7 +1,8 @@
-import json, sqlite3, uuid, shutil, io, re
+import json, sqlite3, uuid, shutil, io, re, os
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file, send_from_directory
+from functools import wraps
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from reportlab.lib.pagesizes import A4, landscape
@@ -15,6 +16,40 @@ ROOT=Path(__file__).resolve().parent
 DATA=ROOT/'data'; ORIGINALS=DATA/'originals'; GENERATED=DATA/'generated'; DB=DATA/'control_center.db'
 for p in (ORIGINALS,GENERATED): p.mkdir(parents=True,exist_ok=True)
 app=Flask(__name__,static_folder='static',static_url_path='')
+
+# ---------- Firebase Authentication ----------
+# Cloud Run has Application Default Credentials automatically. For local development,
+# authentication can be bypassed explicitly by setting DEV_AUTH_BYPASS=1.
+_firebase_auth_ready=False
+try:
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth
+    try:
+        firebase_admin.get_app()
+    except ValueError:
+        firebase_admin.initialize_app(options={'projectId': os.getenv('FIREBASE_PROJECT_ID','sayza-po-grn')})
+    _firebase_auth_ready=True
+except Exception as _firebase_init_error:
+    _firebase_init_error=str(_firebase_init_error)
+
+def require_auth(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if os.getenv('DEV_AUTH_BYPASS','0') == '1' and not os.getenv('K_SERVICE'):
+            return fn(*args, **kwargs)
+        if not _firebase_auth_ready:
+            return jsonify({'error':'Authentication service is not available'}),503
+        header=request.headers.get('Authorization','')
+        if not header.startswith('Bearer '):
+            return jsonify({'error':'Authentication required'}),401
+        try:
+            decoded=firebase_auth.verify_id_token(header[7:].strip())
+            request.firebase_user=decoded
+        except Exception:
+            return jsonify({'error':'Invalid or expired authentication token'}),401
+        return fn(*args, **kwargs)
+    return wrapper
+
 
 PO_COLUMNS=["Sr. No.","Item Code","Item Desc","HSN Code","PO Number","PO Date","PO Release Date","Payment Terms","Expected Delivery Date","PO Expiry Date","Vendor Name","Qty","MRP (INR)","Unit Base Cost (INR)","Taxable Value (INR)","CGST Rate","CGST Amount","SGST/UGST Rate","SGST/UGST Amount","IGST Rate","IGST Amount","CESS Rate","CESS Amount","Additional CESS Rate","Additional CESS Amount","Total (INR)"]
 GRN_COLUMNS=["Sr. No.","SKU Code","SKU Desc","PO Number","GRN Number","Invoice Number","Lot MRP (INR)","Exp Qty","Recv Qty","Unit Price (INR)","Taxable Value (INR)","CGST Rate","CGST Amount","SGST/UGST Rate","SGST/UGST Amount","IGST Rate","IGST Amount","CESS Rate","CESS Amount","Add. Cess Rate","Add. Cess Amount","Total (INR)"]
@@ -72,12 +107,14 @@ def home(): return send_from_directory('static','index.html')
 @app.get('/api/health')
 def health(): return jsonify({'ok':True})
 
+@require_auth
 @app.post('/api/upload/<doc_type>')
 def upload(doc_type):
     doc_type=doc_type.upper()
     if doc_type not in ('PO','GRN'): return jsonify({'error':'Invalid type'}),400
     files=request.files.getlist('files'); return jsonify([save_doc(doc_type,f) for f in files if f.filename])
 
+@require_auth
 @app.get('/api/documents/<doc_type>')
 def documents(doc_type):
     c=conn(); rs=c.execute('SELECT * FROM documents WHERE doc_type=? ORDER BY uploaded_at DESC',(doc_type.upper(),)).fetchall(); c.close()
@@ -90,6 +127,7 @@ def documents(doc_type):
         out.append(d)
     return jsonify(out)
 
+@require_auth
 @app.get('/api/lines/<doc_type>')
 def lines(doc_type):
     c=conn(); rs=c.execute('SELECT l.id AS line_id,l.data_json,l.doc_id,d.filename,d.uploaded_at FROM lines l JOIN documents d ON d.id=l.doc_id WHERE l.doc_type=? AND d.status="Success" ORDER BY d.uploaded_at DESC,l.rowid',(doc_type.upper(),)).fetchall(); c.close()
@@ -98,6 +136,7 @@ def lines(doc_type):
         x=json.loads(r['data_json']); x['_line_id']=r['line_id']; x['_doc_id']=r['doc_id']; x['_filename']=r['filename']; x['_uploaded_at']=r['uploaded_at']; out.append(x)
     return jsonify(out)
 
+@require_auth
 @app.delete('/api/line/<line_id>')
 def delete_line(line_id):
     c=conn()
@@ -113,6 +152,7 @@ def delete_line(line_id):
     c.commit(); c.close()
     return jsonify({'ok':True,'line_id':line_id,'doc_id':row['doc_id'],'remaining_rows':remaining})
 
+@require_auth
 @app.delete('/api/document/<did>')
 def delete_document(did):
     c=conn()
@@ -136,6 +176,7 @@ def delete_document(did):
         pass
     return jsonify({'ok':True,'id':did,'doc_type':d['doc_type'],'filename':d['filename']})
 
+@require_auth
 @app.post('/api/appointment')
 def appointment():
     data=request.get_json(force=True); po=str(data.get('po_number','')).strip(); date=str(data.get('appointment_booked_on','')).strip()
@@ -183,9 +224,11 @@ def get_reconciliation():
         out.append({'po_number':po_meta.get(p,{}).get('po_number',p),'item_code':item,'ordered_qty':ordered,'received_qty':received,'difference_qty':diff,'po_taxable':po_tax,'grn_taxable':grn_tax,'taxable_difference':tax_diff,'po_total':po_total,'grn_total':grn_total,'total_difference':total_diff,'grn_numbers':', '.join(sorted(set(grn_numbers.get(p,[])))),'appointment_booked_on':appointments.get(po_meta.get(p,{}).get('po_number',''),'') if p in po_meta else '','status':status})
     return out
 
+@require_auth
 @app.get('/api/reconciliation')
 def reconciliation(): return jsonify(get_reconciliation())
 
+@require_auth
 @app.get('/api/stats')
 def stats():
     c=conn(); po=c.execute('SELECT COUNT(*) n,COALESCE(SUM(item_count),0) items FROM documents WHERE doc_type="PO" AND status="Success"').fetchone(); gr=c.execute('SELECT COUNT(*) n,COALESCE(SUM(item_count),0) items FROM documents WHERE doc_type="GRN" AND status="Success"').fetchone(); c.close()
@@ -220,6 +263,7 @@ def recon_export_rows(rows):
         out.append({h:r.get(k,'') for h,k in mapping.items()})
     return out
 
+@require_auth
 @app.get('/api/export/<kind>.xlsx')
 def export_xlsx(kind):
     kind=kind.lower()
@@ -229,6 +273,7 @@ def export_xlsx(kind):
     else:return 'Invalid',400
     return send_file(p,as_attachment=True,download_name=p.name)
 
+@require_auth
 @app.post('/api/export/reconciliation-visible.xlsx')
 def export_reconciliation_visible_xlsx():
     payload=request.get_json(silent=True) or {}
@@ -236,12 +281,14 @@ def export_reconciliation_visible_xlsx():
     p=make_xlsx(RECON_HEADERS,recon_export_rows(rows),'PO_GRN_Reconciliation_Visible.xlsx')
     return send_file(p,as_attachment=True,download_name=p.name)
 
+@require_auth
 @app.get('/api/document/<did>/original')
 def original(did):
     c=conn(); r=c.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone(); c.close()
     if not r or not r['stored_name']: return 'Not found',404
     return send_file(ORIGINALS/r['stored_name'],as_attachment=True,download_name=r['filename'])
 
+@require_auth
 @app.get('/api/document/<did>/excel')
 def doc_excel(did):
     c=conn(); d=c.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone(); rs=c.execute('SELECT data_json FROM lines WHERE doc_id=? ORDER BY rowid',(did,)).fetchall(); c.close()
@@ -255,18 +302,22 @@ def pdf_table(title,headers,rows,path):
     doc.build([Paragraph(title,styles['Title']),Spacer(1,8),t])
     return path
 
+@require_auth
 @app.get('/api/export/po.pdf')
 def po_pdf():
     p=GENERATED/'PO_Consolidated.pdf'; pdf_table('Purchase Orders - Consolidated',PO_COLUMNS,all_lines('PO'),p); return send_file(p,as_attachment=True,download_name=p.name)
 
+@require_auth
 @app.get('/api/export/grn.pdf')
 def grn_pdf():
     p=GENERATED/'GRN_Consolidated.pdf'; pdf_table('GRNs - Consolidated',GRN_COLUMNS,all_lines('GRN'),p); return send_file(p,as_attachment=True,download_name=p.name)
 
+@require_auth
 @app.get('/api/export/reconciliation.pdf')
 def recon_pdf():
     p=GENERATED/'PO_GRN_Reconciliation.pdf'; pdf_table('PO ↔ GRN Reconciliation',RECON_HEADERS,recon_export_rows(get_reconciliation()),p); return send_file(p,as_attachment=True,download_name=p.name)
 
+@require_auth
 @app.post('/api/export/reconciliation-visible.pdf')
 def export_reconciliation_visible_pdf():
     payload=request.get_json(silent=True) or {}
@@ -275,6 +326,7 @@ def export_reconciliation_visible_pdf():
     pdf_table('PO ↔ GRN Reconciliation - Visible Rows',RECON_HEADERS,recon_export_rows(rows),p)
     return send_file(p,as_attachment=True,download_name=p.name)
 
+@require_auth
 @app.get('/api/document/<did>/pdf')
 def doc_pdf(did):
     c=conn(); d=c.execute('SELECT * FROM documents WHERE id=?',(did,)).fetchone(); rs=c.execute('SELECT data_json FROM lines WHERE doc_id=? ORDER BY rowid',(did,)).fetchall(); c.close()

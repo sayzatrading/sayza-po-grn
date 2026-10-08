@@ -7,7 +7,17 @@ let poDocs=[],grnDocs=[],poRows=[],grnRows=[],reconRows=[];let uploadType='PO';
 const filters={PO:{},GRN:{},RECON:{}};const selected={PO:new Set(),GRN:new Set()};
 let activeFilter=null;
 const $=x=>document.getElementById(x);const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-function download(u){window.open(u,'_blank')}
+async function download(u){
+  try{
+    const res=await fetch(u);
+    if(!res.ok) throw new Error((await res.text())||'Download failed');
+    const blob=await res.blob();
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    const cd=res.headers.get('Content-Disposition')||''; const m=cd.match(/filename=\"?([^\"]+)\"?/i);
+    a.download=m?m[1]:u.split('/').pop(); document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }catch(e){toast('Download failed: '+e.message)}
+}
 async function downloadVisibleRecon(format){
   const rows=getVisibleReconRows();
   const url=format==='xlsx'?'/api/export/reconciliation-visible.xlsx':'/api/export/reconciliation-visible.pdf';
@@ -94,4 +104,4 @@ function renderDash(){fetch('/api/stats').then(r=>r.json()).then(s=>{$('poFiles'
 function renderAll(){renderPO();renderGRN();renderRecon();renderDash()}
 function toast(s){$('toast').textContent=s;$('toast').style.display='block';setTimeout(()=>$('toast').style.display='none',2500)}
 for(const b of document.querySelectorAll('.nav'))b.onclick=()=>{document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(b.dataset.tab).classList.add('active')};
-$('poSearch').oninput=renderPO;$('grnSearch').oninput=renderGRN;$('reconSearch').oninput=renderRecon;$('statusFilter').onchange=renderRecon;loadAll();
+$('poSearch').oninput=renderPO;$('grnSearch').oninput=renderGRN;$('reconSearch').oninput=renderRecon;$('statusFilter').onchange=renderRecon;window.addEventListener('firebase-auth-signed-in',()=>loadAll());
