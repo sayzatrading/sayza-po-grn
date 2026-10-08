@@ -1,0 +1,70 @@
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ==============================
+# Environment / Secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+*.json.key
+service-account*.json
+*-service-account*.json
+google-credentials*.json
+
+# ==============================
+# Local application data
+# ==============================
+data/
+sample_files/
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# ==============================
+# Generated files
+# ==============================
+*.xlsx
+*.xls
+*.xlsm
+
+# Generated PDFs
+*.pdf
+
+# ==============================
+# Logs
+# ==============================
+*.log
+
+# ==============================
+# Firebase local files
+# ==============================
+.firebase/
+firebase-debug.log*
+firebase-debug.*.log*
+
+# ==============================
+# OS files
+# ==============================
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Editor
+# ==============================
+.vscode/
+.idea/
